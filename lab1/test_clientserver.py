@@ -5,6 +5,7 @@ Simple client server unit test
 import logging
 import threading
 import unittest
+from urllib import response
 
 import clientserver
 from context import lab_logging
@@ -29,6 +30,26 @@ class TestEchoService(unittest.TestCase):
         """Test simple call"""
         msg = self.client.call("Hello VS2Lab")
         self.assertEqual(msg, 'Hello VS2Lab*')
+
+    def test_get_alice(self):
+        """Test GET for existing entry Alice"""
+        response = self.client.get("Alice")
+        self.assertEqual(response, "OK Alice 123")  
+
+    def test_getall(self):
+        """Test GETALL for full database"""
+        response = self.client.getall()
+
+        self.assertIn("Alice 123", response)
+        self.assertIn("Bob 456", response)
+        self.assertIn("Charlie 789", response)
+        self.assertTrue(response.endswith("END"))  
+
+    def test_backend_get(self):
+        self.assertEqual(self._server.get("Alice"), "OK Alice 123")
+
+    def test_backend_get_not_found(self):
+        self.assertTrue(self._server.get("NoOne").startswith("NOTFOUND"))
 
     def tearDown(self):
         self.client.close()  # terminate client after each test
