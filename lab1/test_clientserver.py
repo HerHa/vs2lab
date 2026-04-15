@@ -39,5 +39,56 @@ class TestEchoService(unittest.TestCase):
         cls._server_thread.join()  # wait for server thread to terminate
 
 
+class TestPhoneNumberService(unittest.TestCase):
+    """Test the phone number lookup service"""
+    _server = clientserver.Server()
+    _server_thread = threading.Thread(target=_server.serve)
+
+    @classmethod
+    def setUpClass(cls):
+        cls._server_thread.start()
+
+    def setUp(self):
+        super().setUp()
+        self.client = clientserver.Client()
+
+    def test_get_existing_name(self):
+        """Test getting phone number for existing person"""
+        msg = self.client.get("Jamie")
+        self.assertIn("42", msg)
+        self.assertIn("Jamie", msg)
+
+    def test_get_another_existing_name(self):
+        """Test getting phone number for another existing person"""
+        msg = self.client.get("Hannah")
+        self.assertIn("37", msg)
+        self.assertIn("Hannah", msg)
+
+    def test_get_nonexistent_name(self):
+        """Test getting phone number for non-existent person"""
+        msg = self.client.get("Unknown")
+        self.assertIn("No entry", msg)
+        self.assertIn("Unknown", msg)
+
+    def test_getAll(self):
+        """Test getting all phone numbers"""
+        msg = self.client.getAll()
+        self.assertIn("Jamie", msg)
+        self.assertIn("Hannah", msg)
+        self.assertIn("Bec", msg)
+        self.assertIn("42", msg)
+        self.assertIn("37", msg)
+        self.assertIn("55", msg)
+
+    def tearDown(self):
+        self.client.close()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._server._serving = False
+        cls._server_thread.join()
+
+
 if __name__ == '__main__':
     unittest.main()
+

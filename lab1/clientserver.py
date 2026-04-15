@@ -25,6 +25,28 @@ class Server:
         self.sock.settimeout(3)  # time out in order not to block forever
         self._logger.info("Server bound to socket " + str(self.sock))
 
+    def handle_request(self, data):
+        """ Handle incoming request and return response """
+        message = data.decode('ascii')
+        
+        if message.startswith("GET "):
+            name = message[4:]  # Extract name after "GET "
+            self._logger.info("Requested Phone Number for " + name)
+            if name in self._database:
+                response = name +"s phone number is "+ str(self._database[name])
+            else:
+                response = "No entry for " + name 
+            return response.encode('ascii')
+        elif message == "GETALL":
+            self._logger.info("Requested All Phone Numbers")
+            formatted = "\n".join([f"{name}: {number}" for name, number in self._database.items()])
+            response = "All Phone Numbers:\n" + formatted
+            return response.encode('ascii')
+        else:
+            self._logger.info("Defaulting to echo for message: " + message)
+            return data + "*".encode('ascii')
+    
+
     def serve(self):
         """ Serve echo """
         self.sock.listen(1)
@@ -37,23 +59,8 @@ class Server:
                     if not data:
                         break  # stop if client stopped
 
-                    message = data.decode('ascii')
-                    
-                    if message.startswith("GET "):
-                        name = message[4:]  # Extract name after "GET "
-                        self._logger.info("Requested Phone Number for " + name)
-                        if name in self._database:
-                            response = str(self._database[name])  # Get the number
-                        else:
-                            response = "No entry for " + name 
-                        connection.send(response.encode('ascii'))
-                    elif message == "GETALL":
-                        self._logger.info("Requested All Phone Numbers")
-                        response = str(self._database)
-                        connection.send(response.encode('ascii'))
-                    else:
-                        self._logger.info("Defaulting to echo for message: " + message)
-                        connection.send(data + "*".encode('ascii'))  # Default echo
+                    response = self.handle_request(data)
+                    connection.send(response)
 
                 connection.close()  # close the connection
             except socket.timeout:
