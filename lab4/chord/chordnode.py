@@ -145,14 +145,32 @@ class ChordNode:
                 self.logger.debug("Node {:04n} received STOP from {:04n}."
                                   .format(self.node_id, int(sender)))
                 break
-
+            
+            # Rekursive implementation of lookup request handling, passing along the original sender for direct reply
             if request[0] == constChord.LOOKUP_REQ:  # A lookup request
-                self.logger.info("Node {:04n} received LOOKUP {:04n} from {:04n}."
-                                 .format(self.node_id, int(request[1]), int(sender)))
+                key = request[1]
+                original_sender = request[2]
+                self.logger.info("Node {:04n} received LOOKUP {:04n} from {:04n}. The original sender is {:04n}."
+                                 .format(self.node_id, int(key), int(sender), int(original_sender)))
 
                 # look up and return local successor 
-                next_id: int = self.local_successor_node(request[1])
-                self.channel.send_to([sender], (constChord.LOOKUP_REP, next_id))
+                # next_id: int = self.local_successor_node(request[1])
+                # self.channel.send_to([sender], (constChord.LOOKUP_REP, next_id))
+
+                next_id = self.local_successor_node(key)
+
+                if next_id == self.node_id:  # we are responsible for the key
+                    self.logger.info("Node {:04n} is responsible for key {:04n}."
+                                     .format(self.node_id, int(key)))
+                    
+                    return_value = (constChord.LOOKUP_REP, self.node_id)
+                    self.channel.send_to([original_sender], return_value)
+
+                else:  # forward request to next node
+                    self.logger.info("Node {:04n} forwards LOOKUP {:04n} to {:04n}."
+                                     .format(self.node_id, int(key), int(next_id)))
+                    
+                    self.channel.send_to([str(next_id)], (constChord.LOOKUP_REQ, key, original_sender))  # forward request    
 
                 # Finally do a sanity check
                 if not self.channel.exists(next_id):  # probe for existence

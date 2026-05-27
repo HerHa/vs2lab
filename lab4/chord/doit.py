@@ -29,7 +29,37 @@ class DummyChordClient:
         self.channel.bind(self.node_id)
 
     def run(self):
-        print("Implement me pls...")
+
+        import random
+
+        # existierende Knoten holen
+        nodes = [i.decode() for i in list(self.channel.channel.smembers('node'))]
+
+        # zufälligen StartKnoten auswählen
+        start_node = random.choice(nodes)
+
+        # zufälligen Schlüssel auswählen
+        key = random.randint(0, self.channel.MAXPROC - 1)
+        print(f"Client asks node {start_node} to resolve key {key}")
+        
+        # send lookup request to start node
+        self.channel.send_to([start_node], (constChord.LOOKUP_REQ, key, self.node_id))  
+        # wait for lookup reply
+        message = self.channel.receive_from_any()
+
+        sender = message[0]
+        request = message[1]
+
+        if request[0] == constChord.LOOKUP_REP:
+            responsible_node = request[1]
+            print(f"Client {self.node_id} received lookup reply from node {sender}. Responsible node for key {key} is {responsible_node}.")
+
+        # cheat-sheet FT lookup:
+        # print(f"Max-Node = self.channel.MAXPROC - 1 = {self.channel.MAXPROC - 1}")
+        # print("FT[Node i]: ['predecessor', 'successor', '+2^1', '+2^2', '+2^3', '+2^4', '+2^5']") 
+        # because m=6, so we have 6 fingers in the FT, and the i-th finger points to (node_id + 2^(i-1)) mod 2^m
+
+        # stop nodes
         self.channel.send_to(  # a final multicast
             {i.decode() for i in list(self.channel.channel.smembers('node'))},
             constChord.STOP)
