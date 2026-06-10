@@ -1,10 +1,10 @@
 import zmq
 import sys
-
+import hashlib
 
 def hash_word_to_reducer(word, num_reducers=2):
     """Berechnet, welcher Reducer für dieses Wort zuständig ist."""
-    return hash(word) % num_reducers
+    return int.from_bytes(hashlib.sha256(word.encode()).digest(), byteorder='big') % num_reducers
 
 
 if __name__ == "__main__":
