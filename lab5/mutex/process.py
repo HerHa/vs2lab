@@ -35,7 +35,7 @@ class Process:
     <Request Type>: ENTER | ALLOW  | RELEASE
 
     """
-
+    
     def __init__(self, chan):
         self.channel = chan  # Create ref to actual channel
         self.process_id = self.channel.join('proc')  # Find out who you are
@@ -46,6 +46,19 @@ class Process:
         self.peer_name = 'unassigned'  # The original peer name
         self.peer_type = 'unassigned'  # A flag indicating behavior pattern
         self.logger = logging.getLogger("vs2lab.lab5.mutex.process.Process")
+        
+        # failure handling
+        self.suspected = set()
+        self.last_seen = {}
+        self.miss_count = {}
+        self.receive_timeout = 4
+        self.miss_threshold = 4
+
+        # current local ENTER attempt
+        self.requesting = False
+        self.request_clock = None
+            
+
 
     def __mapid(self, id='-1'):
         # format channel member address
@@ -58,17 +71,30 @@ class Process:
             # self.queue.sort(key = lambda tup: tup[0])
             self.queue.sort()
             # There should never be old ALLOW messages at the head of the queue
-            while self.queue[0][2] == ALLOW:
+            while self.queue and self.queue[0][2] == ALLOW:
                 del (self.queue[0])
                 if len(self.queue) == 0:
                     break
+    
+    def __remove_process_from_queue(self, pid):
+        self.queue = [msg for msg in self.queue if msg[1] != pid]
+        self.__cleanup_queue()
+
 
     def __request_to_enter(self):
         self.clock = self.clock + 1  # Increment clock value
         request_msg = (self.clock, self.process_id, ENTER)
+        
+        self.requesting = True # this process is now requesting to enter the CS
+        self.request_clock = self.clock
+
+        for pid in self.other_processes: # Reset miss count for all other processes when making a new request
+            if pid not in self.suspected:
+                self.miss_count[pid] = 0
+
         self.queue.append(request_msg)  # Append request to queue
         self.__cleanup_queue()  # Sort the queue
-        self.channel.send_to(self.other_processes, request_msg)  # Send request
+        self.channel.send_to(self.active_view(), request_msg)  # Send request to all unsuspected processes
 
     def __allow_to_enter(self, requester):
         self.clock = self.clock + 1  # Increment clock value
@@ -77,7 +103,7 @@ class Process:
 
     def __release(self):
         # need to be first in queue to issue a release
-        assert self.queue[0][1] == self.process_id, 'State error: inconsistent local RELEASE'
+        assert self.queue and self.queue[0][1] == self.process_id, 'State error: inconsistent local RELEASE'
 
         # construct new queue from later ENTER requests (removing all ALLOWS)
         tmp = [r for r in self.queue[1:] if r[2] == ENTER]
@@ -85,44 +111,92 @@ class Process:
         self.clock = self.clock + 1  # Increment clock value
         msg = (self.clock, self.process_id, RELEASE)
         # Multicast release notification
-        self.channel.send_to(self.other_processes, msg)
+        self.channel.send_to(self.active_view(), msg)
 
+        self.requesting = False
+        self.request_clock = None
+    
+    def __waiting_for(self):
+        if not self.requesting or self.request_clock is None:
+            return set()
+
+        waiting = set()
+
+        for pid in self.other_processes:
+            if pid in self.suspected: # ignore sus processes
+                continue
+
+            seen_newer_msg = any( # check if there is a newer message from this process
+                msg[1] == pid and
+                msg[0] > self.request_clock and
+                msg[2] in (ENTER, ALLOW)
+                for msg in self.queue
+            )
+
+            if not seen_newer_msg:
+                waiting.add(pid) # wait for this process if no newer message has been seen
+
+        return waiting
+    
     def __allowed_to_enter(self):
-        # See who has sent a message (the set will hold at most one element per sender)
-        processes_with_later_message = set([req[1] for req in self.queue[1:]])
-        # Access granted if this process is first in queue and all others have answered (logically) later
-        first_in_queue = self.queue[0][1] == self.process_id
-        all_have_answered = len(self.other_processes) == len(
-            processes_with_later_message)
-        return first_in_queue and all_have_answered
+        if not self.queue:
+            return False
+
+        # own enter request must be first in queue
+        if self.queue[0][1] != self.process_id or self.queue[0][2] != ENTER:
+            return False
+
+        if self.__waiting_for():
+            return False
+
+        return True
 
     def __receive(self):
-        # Pick up any message
-        _receive = self.channel.receive_from(self.other_processes, 3)
+        _receive = self.channel.receive_from(self.other_processes, self.receive_timeout)
+
         if _receive:
             msg = _receive[1]
+            sender = msg[1]
 
-            self.clock = max(self.clock, msg[0])  # Adjust clock value...
-            self.clock = self.clock + 1  # ...and increment
+            self.last_seen[sender] = time.time() # update last seen
+            self.miss_count[sender] = 0
+
+            if sender in self.suspected:
+                self.logger.warning(f"{self.__mapid(sender)} is responding again; removing suspicion.")
+                self.suspected.discard(sender)
+
+            self.clock = max(self.clock, msg[0])
+            self.clock = self.clock + 1
 
             self.logger.debug("{} received {} from {}.".format(
                 self.__mapid(),
                 "ENTER" if msg[2] == ENTER
                 else "ALLOW" if msg[2] == ALLOW
-                else "RELEASE", self.__mapid(msg[1])))
+                else "RELEASE",
+                self.__mapid(sender)))
 
             if msg[2] == ENTER:
-                self.queue.append(msg)  # Append an ENTER request
-                # and unconditionally allow (don't want to access CS oneself)
-                self.__allow_to_enter(msg[1])
-            elif msg[2] == ALLOW:
-                self.queue.append(msg)  # Append an ALLOW
-            elif msg[2] == RELEASE:
-                # assure release requester indeed has access (his ENTER is first in queue)
-                assert self.queue[0][1] == msg[1] and self.queue[0][2] == ENTER, 'State error: inconsistent remote RELEASE'
-                del (self.queue[0])  # Just remove first message
+                self.queue.append(msg)
+                self.__allow_to_enter(sender)
 
-            self.__cleanup_queue()  # Finally sort and cleanup the queue
+            elif msg[2] == ALLOW:
+                self.queue.append(msg)
+
+            elif msg[2] == RELEASE:
+                # robuster als assert: entferne passendes ENTER dieses Prozesses
+                removed = False
+                for i, entry in enumerate(self.queue):
+                    if entry[1] == sender and entry[2] == ENTER:
+                        del self.queue[i]
+                        removed = True
+                        break
+
+                if not removed:
+                    self.logger.warning(f"RELEASE from {self.__mapid(sender)} without matching ENTER in queue.")
+
+            self.__cleanup_queue()
+            return sender
+
         else:
             self.logger.info("{} timed out on RECEIVE. Local queue: {}".
                              format(self.__mapid(),
@@ -130,6 +204,48 @@ class Process:
                                         'Clock '+str(msg[0]),
                                         self.__mapid(msg[1]),
                                         msg[2]), self.queue))))
+            return None 
+    
+    def __blocking_processes(self):
+        """
+        Returns processes whose ENTER is currently before my own ENTER
+        and therefore blocks my entry into the CS.
+        """
+        blockers = set()
+
+        if not self.requesting:
+            return blockers
+
+        for msg in self.queue:
+            if msg[1] == self.process_id and msg[2] == ENTER: # end when own ENTER is reached
+                break
+            if msg[2] == ENTER: # only consider ENTER messages as blockers
+                blockers.add(msg[1])
+
+        return blockers
+
+    def __check_failures(self):
+        if not self.requesting:
+            return
+
+        relevant = set(self.__waiting_for()) # waiting processes that are relevant for failure suspicion
+        relevant.update(self.__blocking_processes()) # add blocking processes whose ENTER is before my own ENTER in the queue
+
+        for pid in relevant:
+            if pid in self.suspected:
+                continue
+
+            self.miss_count[pid] = self.miss_count.get(pid, 0) + 1
+
+            if self.miss_count[pid] >= self.miss_threshold:
+                if pid not in self.suspected:
+                    self.logger.warning("Suspecting {}".format(pid))
+                self.suspected.add(pid)
+                self.__remove_process_from_queue(pid)
+                
+    def active_view(self):
+        return [p for p in self.other_processes if p not in self.suspected]
+
 
     def init(self, peer_name, peer_type):
         self.channel.bind(self.process_id)
@@ -146,6 +262,11 @@ class Process:
 
         self.logger.info("{} joined channel as {}.".format(
             peer_name, self.__mapid()))
+        
+        for pid in self.other_processes:
+            self.last_seen[pid] = None
+            self.miss_count[pid] = 0
+
 
     def run(self):
         while True:
@@ -160,8 +281,14 @@ class Process:
                                   .format(self.__mapid(), self.clock))
 
                 self.__request_to_enter()
+
                 while not self.__allowed_to_enter():
-                    self.__receive()
+                    sender = self.__receive()
+
+                    if sender is None:
+                        self.__check_failures() # check for failures if receive timed out
+                   
+
 
                 # Stay in CS for some time ...
                 sleep_time = random.randint(0, 2000)
