@@ -2,7 +2,7 @@ import logging
 import random
 import time
 
-from constMutex import ENTER, RELEASE, ALLOW, ACTIVE
+from constMutex import ENTER, RELEASE, ALLOW, ACTIVE, HEARTBEAT
 
 
 class Process:
@@ -57,6 +57,9 @@ class Process:
         # current local ENTER attempt
         self.requesting = False
         self.request_clock = None
+
+        self.heartbeat_interval = 2.0   # Sekunden zwischen Heartbeats
+        self.next_heartbeat = time.time() + self.heartbeat_interval
             
 
 
@@ -80,6 +83,13 @@ class Process:
         self.queue = [msg for msg in self.queue if msg[1] != pid]
         self.__cleanup_queue()
 
+    def __send_heartbeat(self):
+        """
+        Schickt ein HEARTBEAT an alle anderen Prozesse.
+        Dient nur als Lebenszeichen, keine Queue-Änderung.
+        """
+        msg = (self.clock, self.process_id, HEARTBEAT)
+        self.channel.send_to(self.other_processes, msg)
 
     def __request_to_enter(self):
         self.clock = self.clock + 1  # Increment clock value
@@ -92,9 +102,12 @@ class Process:
             if pid not in self.suspected:
                 self.miss_count[pid] = 0
 
+        self.queue = [m for m in self.queue if not (
+            m[1] == self.process_id and m[2] == ENTER)]
+
         self.queue.append(request_msg)  # Append request to queue
         self.__cleanup_queue()  # Sort the queue
-        self.channel.send_to(self.active_view(), request_msg)  # Send request to all unsuspected processes
+        self.channel.send_to(self.other_processes, request_msg)  # Send request to all unsuspected processes
 
     def __allow_to_enter(self, requester):
         self.clock = self.clock + 1  # Increment clock value
@@ -111,7 +124,7 @@ class Process:
         self.clock = self.clock + 1  # Increment clock value
         msg = (self.clock, self.process_id, RELEASE)
         # Multicast release notification
-        self.channel.send_to(self.active_view(), msg)
+        self.channel.send_to(self.other_processes, msg)
 
         self.requesting = False
         self.request_clock = None
@@ -124,7 +137,7 @@ class Process:
 
         for pid in self.other_processes:
             if pid in self.suspected: # ignore sus processes
-                continue
+               continue
 
             seen_newer_msg = any( # check if there is a newer message from this process
                 msg[1] == pid and
@@ -174,8 +187,12 @@ class Process:
                 else "ALLOW" if msg[2] == ALLOW
                 else "RELEASE",
                 self.__mapid(sender)))
-
+            if msg[2] == HEARTBEAT:
+                # nur last_seen aktualisieren, sonst nichts
+                return sender
             if msg[2] == ENTER:
+                self.queue = [m for m in self.queue if not (
+                    m[1] == sender and m[2] == ENTER)]
                 self.queue.append(msg)
                 self.__allow_to_enter(sender)
 
@@ -192,8 +209,8 @@ class Process:
                         break
 
                 if not removed:
-                    self.logger.warning(f"RELEASE from {self.__mapid(sender)} without matching ENTER in queue.")
-
+                    self.logger.warning(
+                        f"RELEASE from {self.__mapid(sender)} without matching ENTER in queue.")
             self.__cleanup_queue()
             return sender
 
@@ -225,24 +242,32 @@ class Process:
         return blockers
 
     def __check_failures(self):
-        if not self.requesting:
-            return
+        """
+        Prüft für alle anderen Prozesse anhand von Heartbeats,
+        ob sie seit längerer Zeit nichts mehr gesendet haben.
+        Verdächtigte Prozesse werden markiert und aus der Queue entfernt.
+        """
+        now = time.time()
 
-        relevant = set(self.__waiting_for()) # waiting processes that are relevant for failure suspicion
-        relevant.update(self.__blocking_processes()) # add blocking processes whose ENTER is before my own ENTER in the queue
+        for pid in self.other_processes:
+            # Wir betrachten alle, auch PASSIVE
+            last = self.last_seen.get(pid)
 
-        for pid in relevant:
-            if pid in self.suspected:
+            # Wenn wir noch nie etwas von pid gesehen haben, überspringen wir ihn erstmal
+            if last is None:
                 continue
 
-            self.miss_count[pid] = self.miss_count.get(pid, 0) + 1
+            if now - last > self.receive_timeout * self.heartbeat_interval:
+                self.miss_count[pid] += 1
+            else:
+                self.miss_count[pid] = 0
 
             if self.miss_count[pid] >= self.miss_threshold:
                 if pid not in self.suspected:
                     self.logger.warning("Suspecting {}".format(pid))
-                self.suspected.add(pid)
-                self.__remove_process_from_queue(pid)
-                
+                    self.suspected.add(pid)
+                    self.__remove_process_from_queue(pid)
+            
     def active_view(self):
         return [p for p in self.other_processes if p not in self.suspected]
 
@@ -267,15 +292,25 @@ class Process:
             self.last_seen[pid] = None
             self.miss_count[pid] = 0
 
+    def __tick_heartbeat(self):
+        now = time.time()
+        if now >= self.next_heartbeat:
+            self.clock += 1
+            self.__send_heartbeat()
+            self.next_heartbeat = now + self.heartbeat_interval
 
     def run(self):
         while True:
+            self.__tick_heartbeat()
+
+            self.__check_failures()
             # Enter the critical section if
             # 1) there are more than one process left and
             # 2) this peer has active behavior and
             # 3) random is true
             if len(self.all_processes) > 1 and \
                     self.peer_type == ACTIVE and \
+                    not self.requesting and \
                     random.choice([True, False]):
                 self.logger.debug("{} wants to ENTER CS at CLOCK {}."
                                   .format(self.__mapid(), self.clock))
@@ -284,7 +319,7 @@ class Process:
 
                 while not self.__allowed_to_enter():
                     sender = self.__receive()
-
+                    self.__tick_heartbeat()
                     if sender is None:
                         self.__check_failures() # check for failures if receive timed out
                    
