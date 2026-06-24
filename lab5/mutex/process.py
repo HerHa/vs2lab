@@ -107,7 +107,7 @@ class Process:
 
         self.queue.append(request_msg)  # Append request to queue
         self.__cleanup_queue()  # Sort the queue
-        self.channel.send_to(self.other_processes, request_msg)  # Send request to all unsuspected processes
+        self.channel.send_to(self.other_processes, request_msg)  # Send request to all processes
 
     def __allow_to_enter(self, requester):
         self.clock = self.clock + 1  # Increment clock value
@@ -223,23 +223,7 @@ class Process:
                                         msg[2]), self.queue))))
             return None 
     
-    def __blocking_processes(self):
-        """
-        Returns processes whose ENTER is currently before my own ENTER
-        and therefore blocks my entry into the CS.
-        """
-        blockers = set()
-
-        if not self.requesting:
-            return blockers
-
-        for msg in self.queue:
-            if msg[1] == self.process_id and msg[2] == ENTER: # end when own ENTER is reached
-                break
-            if msg[2] == ENTER: # only consider ENTER messages as blockers
-                blockers.add(msg[1])
-
-        return blockers
+    
 
     def __check_failures(self):
         """
@@ -250,10 +234,9 @@ class Process:
         now = time.time()
 
         for pid in self.other_processes:
-            # Wir betrachten alle, auch PASSIVE
             last = self.last_seen.get(pid)
 
-            # Wenn wir noch nie etwas von pid gesehen haben, überspringen wir ihn erstmal
+            # skip if we have never seen this process before
             if last is None:
                 continue
 
@@ -321,8 +304,7 @@ class Process:
                     sender = self.__receive()
                     self.__tick_heartbeat()
                     if sender is None:
-                        self.__check_failures() # check for failures if receive timed out
-                   
+                        self.__check_failures() # check for failures if received timed out
 
 
                 # Stay in CS for some time ...
